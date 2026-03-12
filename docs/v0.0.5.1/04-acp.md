@@ -29,40 +29,64 @@ zchat-acp 面向 **Agent** 的控制层。核心原语：Hook 的注册与调度
 
 **来源**：[github.com/smtg-ai/claude-squad](https://github.com/smtg-ai/claude-squad) — 6k+ stars。另见[官网](https://smtg-ai.github.io/claude-squad/)。
 
-| 借鉴 | 应用 |
-|---|---|
-| tmux session = window | sessionId ↔ window 1:1 |
-| capture-pane + send-keys | Hook(on_output) + prompt 注入 |
-| --daemon | zchat-acp headless 运行 |
-| worktree | 外化到 spawn pre_spawn |
+**与 zchat 的关系**：Claude Squad 是单机多 Agent 并行管理器——在一台机器上用 tmux 隔离多个 CC 实例。zchat-acp 的 tmux backend 直接对标其核心架构，但将管理范围从"单机多 Agent"扩展到"局域网多人多 Agent"。Claude Squad 解决了 tmux 层的工程难题，zchat 可以复用其方案，专注于网络层和协作层。
+
+| 借鉴 | 应用 | 为什么借鉴 |
+|---|---|---|
+| tmux session 1:1 映射 | sessionId ↔ window 1:1 | 每个 Agent 独占一个 tmux session，生命周期清晰，避免多 Agent 共享 session 的复杂性 |
+| PTY 直连 + capture-pane 轮询 | Hook(on_output) + prompt 注入 | 通过 PTY 写入原始字节，比 `tmux send-keys` 更可靠；capture-pane 100ms 轮询 + SHA-256 变化检测实现输出监听 |
+| 正则匹配检测 Agent 状态 | OutputParser 状态分类 | 通过匹配 CC 的已知 prompt 模式（如权限请求文本）判断 Agent 是否空闲/等待输入——简单但脆弱，zchat 需要 fallback 策略 |
+| daemon 模式（TUI/daemon 互斥） | zchat-acp headless 运行 | TUI 退出时 fork 独立 daemon 进程自动应答，zchat 类似但需支持网络事件，不能仅做 auto-accept |
+| worktree 隔离 | 外化到 spawn pre_spawn | 每个 Agent 独立 git worktree，避免并发 Agent 在同一工作目录冲突 |
+
+**注意差异**：Claude Squad 硬编码 10 实例上限，无并发安全（多 TUI 实例共享状态文件会冲突），diff 基于创建时 HEAD（主分支前进后 diff 膨胀）。zchat 需规避这些问题。
 
 ### 2.2 来自 Xuanwo/acp-claude-code
 
 **来源**：[github.com/Xuanwo/acp-claude-code](https://github.com/Xuanwo/acp-claude-code) — 237 stars, 归档。另见 [Zed Official ACP](https://github.com/zed-industries/claude-agent-acp)。
 
-| 借鉴 | 应用 |
-|---|---|
-| ACP JSON-RPC 格式 | DataType(AcpPayload) |
-| Capability negotiation | initialize Message |
-| Permission mode | Annotation(injection_path) |
+**与 zchat 的关系**：acp-claude-code 是最早将 Claude Code 接入 ACP 协议的桥接器（存活约一周后被 Zed 官方实现取代）。zchat 的 DataType(AcpPayload) 需要理解 ACP JSON-RPC 的格式约定，而 Zed 官方实现展示了生产级的 capability 协商和权限流。两者合在一起提供了 ACP 适配的完整参考。
+
+| 借鉴 | 应用 | 为什么借鉴 |
+|---|---|---|
+| stdio JSON-RPC 传输 | DataType(AcpPayload) 格式 | ACP 以 stdin/stdout 换行分隔 JSON-RPC 为默认传输，zchat 的 AcpPayload 需要遵守此格式以保持兼容性 |
+| Capability 协商（initialize 握手） | initialize Message | 客户端和 Agent 在连接时交换能力集（如 loadSession、image、audio），zchat spawn 时同样需要协商 Agent 支持的能力 |
+| Permission mode 分级 | Annotation(injection_path) | 从 default → acceptEdits → bypassPermissions 分级控制，Zed 官方版进一步引入 canUseTool 回调实现交互式授权——zchat 的 Access 模型可参考此分级 |
+| 长生命周期 session（Pushable 模式） | session resume | Zed 官方版用异步可迭代流保持 CC 进程跨 prompt 存活，避免每次 prompt 重建 query——zchat 的 session 也需要持久化 |
+
+**注意差异**：Xuanwo 版每次 prompt 创建新 query（靠 resume 恢复），Zed 版用 Pushable 流保持单一 query。zchat 通过 tmux session 天然持久化，不需要模仿 Pushable 模式，但 resume 逻辑值得参考。
 
 ### 2.3 来自 Claude-to-IM
 
-**来源**：[github.com/op7418/Claude-to-IM](https://github.com/op7418/Claude-to-IM)。
+**来源**：[github.com/op7418/Claude-to-IM](https://github.com/op7418/Claude-to-IM)。从 [CodePilot](https://github.com/op7418/CodePilot) 提取的独立库。
 
-| 借鉴 | 应用 |
-|---|---|
-| 输出事件分类 | Hook(on_output) |
-| canUseTool 阻塞 | Hook(pre_tool_use) |
-| Session lock | Access control |
+**与 zchat 的关系**：Claude-to-IM 将 Claude Code 的输出桥接到 IM 平台（Telegram/Discord/飞书/QQ），核心解决"如何分类 Agent 输出事件"和"如何在 Agent 执行过程中阻塞等待人类授权"两个问题。zchat-acp 的 Hook(on_output) 和 Hook(pre_tool_use) 面对完全相同的问题，但 zchat 走 Zenoh P2P 而非 IM HTTP API。
+
+| 借鉴 | 应用 | 为什么借鉴 |
+|---|---|---|
+| SSE 事件分类（text/tool_use/permission_request/status） | Hook(on_output) 事件类型 | 将 CC 的流式输出分类为文本块、工具调用、权限请求、状态变更——zchat 的 OutputParser 需要同样的分类逻辑 |
+| previewText 与 currentText 分离 | OutputParser 聚合策略 | currentText 在 tool_use 时重置，previewText 只增不减——保证流式预览连续性。zchat 向 Room 广播时同样需要区分"当前块"和"完整回合" |
+| canUseTool 阻塞式权限流 | Hook(pre_tool_use) | CC SDK 的 canUseTool 回调是 async 阻塞的——返回 Promise 前工具不执行。zchat 通过 Zenoh 转发权限请求给 Operator，同样需要阻塞-等待-超时机制 |
+| Promise chain session lock | Access control 串行化 | 同一 session 的消息通过 Promise chain 串行处理，不同 session 并发——防止竞态。zchat 的 Access guard 需要同样的 per-session 串行保证 |
+| DI 四接口解耦（Store/LLM/Permission/Lifecycle） | zchat-acp interface 抽象 | 将持久化、LLM 调用、权限解析、生命周期钩子拆为独立接口——zchat 的 Backend 抽象（当前仅 tmux）可借鉴此解耦模式 |
+
+**注意差异**：Claude-to-IM 的权限超时是 5 分钟硬编码。zchat 的 Operator 可能不在线，需要更灵活的超时策略（如 AFK 自动降级）。
 
 ### 2.4 来自 ACP 生态
 
-**来源**：[ACP spec](https://github.com/agentclientprotocol/agent-client-protocol)、[zed.dev/acp](https://zed.dev/acp)。
+**来源**：[ACP spec](https://github.com/agentclientprotocol/agent-client-protocol)、[zed.dev/acp](https://zed.dev/acp)。2.3k+ stars，由 Zed + JetBrains 共同维护。
 
-| 借鉴 | 应用 |
-|---|---|
-| session/set_mode | Access mode 切换 |
+**与 zchat 的关系**：ACP 是 AI Agent 与编辑器之间的标准协议（"Agent 界的 LSP"）。zchat 的 ACP 扩展方法（`_zchat.dev/*`）构建在 ACP 规范之上。理解 ACP 的设计哲学有助于让 zchat 的扩展与生态兼容。
+
+| 借鉴 | 应用 | 为什么借鉴 |
+|---|---|---|
+| session/set_mode + Config Options | Access mode 切换 | ACP 正从固定 mode 枚举迁移到通用 Config Options（key-value 选择器），zchat 的 mode 设计应跟随此趋势以保持兼容 |
+| Capability 协商 + 单整数版本号 | initialize 握手 | 通过能力集而非版本号驱动功能发现——新功能加 capability 而不升大版本，zchat 可复用此模式实现渐进式功能扩展 |
+| Permission request（allow_once/always/reject） | Access 权限语义 | ACP 定义了四种权限响应语义，zchat 的 Owner/Operator/Observer 可映射到这些语义上 |
+| `_` 前缀扩展方法 | `_zchat.dev/*` 方法命名 | ACP 保留无前缀方法给标准协议，`_` 前缀用于自定义扩展——zchat 已遵循此约定 |
+| MCP-over-ACP（RFD 草案） | 未来 MCP 集成路径 | 允许通过 ACP 通道路由 MCP 工具调用，免去独立 MCP server 进程——zchat 可关注此 RFD 的进展 |
+
+**注意**：ACP 当前 30+ Agent 实现（含 Claude、Copilot、Gemini CLI、Codex CLI），5 语言 SDK。zchat 的 `_zchat.dev/*` 扩展在协议层合规，但应关注 session/resume 和 Proxy Chains RFD 的进展——后者可能影响 zchat 的迁移机制设计。
 
 ---
 

@@ -25,21 +25,33 @@ zchat-com 面向**人类**的通信抽象——无 UI 的 Python 库。实现通
 
 **来源**：[CC Agent Teams](https://code.claude.com/docs/en/agent-teams)，2026-02-05。另见 [paddo.dev](https://paddo.dev/blog/claude-code-hidden-swarm/)、[alexop.dev](https://alexop.dev/posts/from-tasks-to-swarms-agent-teams-in-claude-code/)。
 
-| 借鉴 | 应用 |
-|---|---|
-| Inbox mailbox | Zenoh 传输的 inbox（Index retention=relay） |
-| P2P messaging | 无 leader 瓶颈 |
-| Delegate mode | Annotation(priority) 机制 |
+**与 zchat 的关系**：Agent Teams 是 Claude Code 内置的多 Agent 协作系统——一个 session 作为 team lead 派发任务，多个 teammate session 并行执行。它使用文件系统做协调（磁盘上的 JSON 文件充当 inbox 和 task list），所有通信限于单机。zchat-com 将相同的协作模式扩展到局域网多人场景：用 Zenoh P2P 替代文件系统，用 Room 替代 team，用 Message + Annotation 替代 mailbox + task list。
+
+| 借鉴 | 应用 | 为什么借鉴 |
+|---|---|---|
+| 文件系统 Inbox mailbox | Zenoh 传输的 inbox（Index retention=relay） | Agent Teams 用磁盘文件做消息投递，天然持久化且 crash-safe。zchat 用 Zenoh pub/sub + outbox/relay 实现同样的持久化投递，但支持跨机器 |
+| P2P 消息（任意 teammate 间直接通信） | 无 leader 瓶颈的 Message 路由 | Agent Teams 允许 teammate 间直接通信，不经过 lead 中转——zchat 同样采用 P2P 路由，避免单点瓶颈 |
+| Delegate mode（lead 只协调不执行） | Annotation(priority) 机制 | Delegate mode 将 lead 定位为纯调度者。zchat 通过 Annotation priority 实现类似效果：@mention 的 Agent 获得 CRITICAL 优先级，其他成员按 NORMAL 接收 |
+| 自领取任务 + 依赖感知 | Room 内 Agent 自主响应 | Agent Teams 的 teammate 自动认领未被占用的 unblocked task，无需 lead 逐个分配。zchat 的 Agent 基于 Annotation priority 自主决定响应顺序，理念一致 |
+| broadcast 消息（慎用，成本线性增长） | Room 广播规则 | Agent Teams 明确警告 broadcast 的 token 成本与成员数成正比。zchat 的房间广播也需要同样的设计意识——每个 Agent 成员都是一个完整 context window |
+
+**注意差异**：Agent Teams 限于单机（文件系统协调），无固定 leadership 转让，不支持 Agent 迁移。zchat 需解决跨机器投递、Owner 转让（grant）、离线补偿等 Agent Teams 不涉及的问题。
 
 ### 2.2 来自 Claude-to-IM
 
 **来源**：[github.com/op7418/Claude-to-IM](https://github.com/op7418/Claude-to-IM)，MIT。从 [CodePilot](https://github.com/op7418/CodePilot) 提取。
 
-| 借鉴 | 应用 |
-|---|---|
-| Channel Router | Message 路由基于 Index |
-| Permission flow | Message(content_type=acp.request_permission) → callback |
-| Delivery retry | outbox/relay 机制 |
+**与 zchat 的关系**：Claude-to-IM 将 Claude Code 的消息桥接到 IM 平台（Telegram/Discord/飞书/QQ）。它的 Channel Router 解决了"如何将消息从 Agent 路由到正确的聊天频道"，Delivery Layer 解决了"如何可靠投递到可能离线的对端"——这两个问题与 zchat-com 的 Message 路由和 outbox/relay 机制高度同构。zchat 面对的是 Zenoh topic 而非 IM API，但路由和投递的设计模式可以复用。
+
+| 借鉴 | 应用 | 为什么借鉴 |
+|---|---|---|
+| Channel Router（地址 → session 绑定） | Message 路由基于 Index | Claude-to-IM 将 IM chatId 绑定到 CC session，按绑定关系路由消息。zchat 将 Room/DM 绑定到 Index topic，思路一致但路由目标从"IM 频道"变为"Zenoh key expression" |
+| 权限请求转发（流内阻塞 → IM 按钮 → 回调解除） | Message(content_type=acp.request_permission) → callback | Claude-to-IM 在消费 SSE 流时同步转发权限请求到 IM，用户点击按钮后回调解除阻塞。zchat 通过 Zenoh 将权限请求 Message 路由给 Operator，机制不同但流程同构 |
+| 可靠投递（分块 + 去重 + 分类重试 + 指数退避） | outbox/relay 机制 | Claude-to-IM 将投递失败分为 rate_limit/server_error/network（可重试）和 client_error/parse_error（不重试），配合指数退避和 jitter。zchat 的 outbox/relay 需要类似的错误分类和重试策略 |
+| 双层 offset 安全（fetchOffset / committedOffset） | store 的 ACK 机制 | Telegram adapter 分离"已拉取"和"已确认"两个 offset，保证 crash 后不丢消息。zchat 的 DeliveryConfirm 机制解决相同问题 |
+| Adapter 注册表（插件式多平台） | 未来扩展模式参考 | Claude-to-IM 通过 side-effect import 自注册 adapter，添加新平台只需一个文件。zchat 当前仅支持 CC backend，但未来扩展其他 Agent 时可参考此模式 |
+
+**注意差异**：Claude-to-IM 面对的是 IM HTTP API（有平台限制如消息长度、速率限制），zchat 面对的是 Zenoh P2P（无外部速率限制但需处理 peer 离线）。投递层的约束不同，但可靠投递的设计模式是通用的。
 
 ---
 

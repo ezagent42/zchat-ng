@@ -9,6 +9,7 @@ Edit this file to add/remove dependencies. Changes are applied on next session s
 <!-- Without -s flags, all skills from the source are installed -->
 - obra/superpowers
 - anthropics/claude-plugins-official -s skill-creator -s claude-md-improver -s claude-automation-recommender
+- vercel-labs/agent-browser -s agent-browser
 
 ## Tools
 
