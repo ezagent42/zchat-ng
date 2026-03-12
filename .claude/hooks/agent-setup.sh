@@ -6,6 +6,8 @@ set -euo pipefail
 
 SETUP_FILE="${CLAUDE_PROJECT_DIR}/AGENT_SETUP.md"
 HASH_FILE="${CLAUDE_PROJECT_DIR}/.agents/.last-setup-hash"
+VERSION_FILE="${CLAUDE_PROJECT_DIR}/.claude/.template-version"
+TEMPLATE_REPO="https://github.com/ezagent42/agent-setup.git"
 WARNINGS=""
 
 escape_for_json() {
@@ -59,7 +61,7 @@ if [ "$SETUP_CHANGED" = true ] && [ -n "$SKILL_LINES" ]; then
     [ -z "$line" ] && continue
     # Each line becomes: pnpm dlx skills add <args> --agent claude-code -y
     # Redirect all output away from stdout to avoid corrupting hook JSON
-    if ! pnpm dlx skills add $line --agent claude-code -y >/dev/null 2>&1; then
+    if ! pnpm dlx skills add $line --agent claude-code -y </dev/null >/dev/null 2>&1; then
       INSTALL_ERRORS="${INSTALL_ERRORS}\nFailed to install: $line"
     fi
   done <<< "$SKILL_LINES"
@@ -81,7 +83,18 @@ if [ -n "$TOOL_LINES" ]; then
   done <<< "$TOOL_LINES"
 fi
 
-# --- 8. Output JSON ---
+# --- 8. Check template version (non-blocking) ---
+UPDATE_NOTICE=""
+if [ -f "$VERSION_FILE" ]; then
+  LOCAL_SHA=$(cat "$VERSION_FILE")
+  # git ls-remote is fast (~200ms), only fetches ref metadata
+  REMOTE_SHA=$(git ls-remote "$TEMPLATE_REPO" refs/heads/main 2>/dev/null | cut -f1 || true)
+  if [ -n "$REMOTE_SHA" ] && [ "$REMOTE_SHA" != "$LOCAL_SHA" ]; then
+    UPDATE_NOTICE="agent-setup template update available (${REMOTE_SHA:0:7}). Run: ./update-from-template.sh"
+  fi
+fi
+
+# --- 9. Output JSON ---
 if [ "$SETUP_CHANGED" = true ] && [ -n "$SKILL_LINES" ]; then
   MSG="Agent Setup updated. Please restart Claude Code to load new skills."
   if [ -n "$INSTALL_ERRORS" ]; then
@@ -95,6 +108,10 @@ else
   if [ -n "$WARNINGS" ]; then
     MSG="${MSG}\\n${WARNINGS}"
   fi
+fi
+
+if [ -n "$UPDATE_NOTICE" ]; then
+  MSG="${MSG}\\n${UPDATE_NOTICE}"
 fi
 
 # Escape for JSON

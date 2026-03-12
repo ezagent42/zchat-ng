@@ -37,6 +37,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source user-local overrides (proxy, API keys, etc.)
 [ -f "$SCRIPT_DIR/claude.local.sh" ] && source "$SCRIPT_DIR/claude.local.sh"
 
+# Source MCP server secrets (API keys, tokens)
+[ -f "$SCRIPT_DIR/.mcp.env" ] && set -a && source "$SCRIPT_DIR/.mcp.env" && set +a
+
 # Get project name from directory (sanitize for tmux session name)
 PROJECT_NAME=$(basename "$SCRIPT_DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')
 

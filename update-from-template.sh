@@ -25,9 +25,21 @@ error() { echo -e "${RED}[agent-setup]${NC} $*" >&2; }
 clone_template() {
   local tmpdir
   tmpdir=$(mktemp -d)
-  info "Cloning template from $TEMPLATE_REPO..."
+  info "Cloning template from $TEMPLATE_REPO..." >&2
   git clone --depth 1 "$TEMPLATE_REPO" "$tmpdir" 2>/dev/null
   echo "$tmpdir"
+}
+
+# --- Save template version (commit SHA) ---
+save_template_version() {
+  local template_dir="$1"
+  local version_file="$PROJECT_DIR/.claude/.template-version"
+  local sha
+  sha=$(git -C "$template_dir" rev-parse HEAD 2>/dev/null || true)
+  if [ -n "$sha" ]; then
+    echo "$sha" > "$version_file"
+    info "  Saved template version: ${sha:0:7}"
+  fi
 }
 
 # --- Compute checksums of template files ---
@@ -44,6 +56,13 @@ compute_checksums() {
   done
   # Config files
   for f in "$template_dir"/.claude/commands/*.md "$template_dir"/.claude/agents/*.md; do
+    if [ -f "$f" ]; then
+      local relpath="${f#$template_dir/}"
+      echo "$(shasum -a 256 "$f" | cut -d' ' -f1)  $relpath" >> "$checksum_file"
+    fi
+  done
+  # Bundled skills
+  for f in "$template_dir"/.claude/skills/*/SKILL.md; do
     if [ -f "$f" ]; then
       local relpath="${f#$template_dir/}"
       echo "$(shasum -a 256 "$f" | cut -d' ' -f1)  $relpath" >> "$checksum_file"
@@ -216,6 +235,38 @@ do_init() {
   copy_file "$TEMPLATE_DIR/.claude/RTK.md" "$PROJECT_DIR/.claude/RTK.md"
   info "  Updated RTK.md"
 
+  # .claude/mcp.json → only if not exists (users add their own MCP servers)
+  if [ ! -f "$PROJECT_DIR/.claude/mcp.json" ]; then
+    copy_file "$TEMPLATE_DIR/.claude/mcp.json" "$PROJECT_DIR/.claude/mcp.json"
+    info "  Created mcp.json"
+  else
+    info "  mcp.json already exists, skipping"
+  fi
+
+  # .mcp.env.example → always overwrite (template may add new keys)
+  if [ -f "$TEMPLATE_DIR/.mcp.env.example" ]; then
+    copy_file "$TEMPLATE_DIR/.mcp.env.example" "$PROJECT_DIR/.mcp.env.example"
+    info "  Updated .mcp.env.example"
+  fi
+
+  # .claude/skills/* → bundled skills, only if not exists (skip symlinks)
+  if [ -d "$TEMPLATE_DIR/.claude/skills" ]; then
+    for skill_dir in "$TEMPLATE_DIR"/.claude/skills/*/; do
+      [ -d "$skill_dir" ] || continue
+      skill_name=$(basename "$skill_dir")
+      project_skill="$PROJECT_DIR/.claude/skills/$skill_name"
+      if [ -L "$project_skill" ]; then
+        info "  Skill $skill_name is a symlink (managed by skills CLI), skipping"
+      elif [ ! -d "$project_skill" ]; then
+        mkdir -p "$project_skill"
+        cp -r "$skill_dir"* "$project_skill/"
+        info "  Created skill: $skill_name"
+      else
+        info "  Skill $skill_name already exists, skipping"
+      fi
+    done
+  fi
+
   # --- 3. Merge settings.json ---
   info "Merging settings.json..."
   if command -v jq &>/dev/null; then
@@ -280,10 +331,15 @@ do_init() {
     echo '.claude/.template-checksums' >> "$PROJECT_DIR/.gitignore"
     info "  Added .claude/.template-checksums to .gitignore"
   fi
+  if ! grep -qF '.claude/.template-version' "$PROJECT_DIR/.gitignore" 2>/dev/null; then
+    echo '.claude/.template-version' >> "$PROJECT_DIR/.gitignore"
+    info "  Added .claude/.template-version to .gitignore"
+  fi
 
-  # --- 5. Save template checksums ---
+  # --- 5. Save template checksums + version ---
   compute_checksums "$TEMPLATE_DIR" "$CHECKSUMS_FILE"
   info "  Saved template checksums"
+  save_template_version "$TEMPLATE_DIR"
 
   # --- 6. Install skills ---
   info "Installing skills from AGENT_SETUP.md..."
@@ -338,6 +394,20 @@ do_update() {
     UPDATED=$((UPDATED + 1))
   done
 
+  # mcp.json: only if not exists (users add their own MCP servers)
+  if [ -f "$TEMPLATE_DIR/.claude/mcp.json" ] && [ ! -f "$PROJECT_DIR/.claude/mcp.json" ]; then
+    copy_file "$TEMPLATE_DIR/.claude/mcp.json" "$PROJECT_DIR/.claude/mcp.json"
+    info "  Created: .claude/mcp.json"
+    UPDATED=$((UPDATED + 1))
+  fi
+
+  # .mcp.env.example: always overwrite (template may add new keys)
+  if [ -f "$TEMPLATE_DIR/.mcp.env.example" ]; then
+    copy_file "$TEMPLATE_DIR/.mcp.env.example" "$PROJECT_DIR/.mcp.env.example"
+    info "  Updated: .mcp.env.example"
+    UPDATED=$((UPDATED + 1))
+  fi
+
   # Config files: only if user hasn't modified
   for f in "$TEMPLATE_DIR"/.claude/commands/*.md "$TEMPLATE_DIR"/.claude/agents/*.md; do
     [ -f "$f" ] || continue
@@ -369,8 +439,47 @@ do_update() {
     fi
   done
 
-  # Update checksums
+  # Bundled skills: copy template skill directories (skip symlinks from skills CLI)
+  if [ -d "$TEMPLATE_DIR/.claude/skills" ]; then
+    for skill_dir in "$TEMPLATE_DIR"/.claude/skills/*/; do
+      [ -d "$skill_dir" ] || continue
+      skill_name=$(basename "$skill_dir")
+      project_skill="$PROJECT_DIR/.claude/skills/$skill_name"
+
+      # Skip if project has a symlink (managed by skills CLI)
+      if [ -L "$project_skill" ]; then
+        continue
+      fi
+
+      if [ ! -d "$project_skill" ]; then
+        # Skill doesn't exist — copy it
+        mkdir -p "$project_skill"
+        cp -r "$skill_dir"* "$project_skill/"
+        info "  Created skill: $skill_name"
+        UPDATED=$((UPDATED + 1))
+      else
+        # Check if user has modified it (compare SKILL.md checksum)
+        relpath=".claude/skills/$skill_name/SKILL.md"
+        stored_hash=$(get_stored_checksum "$relpath")
+        if [ -n "$stored_hash" ]; then
+          current_hash=$(shasum -a 256 "$project_skill/SKILL.md" | cut -d' ' -f1)
+          if [ "$current_hash" = "$stored_hash" ]; then
+            cp -r "$skill_dir"* "$project_skill/"
+            info "  Updated skill: $skill_name"
+            UPDATED=$((UPDATED + 1))
+          else
+            warn "  Skipped skill: $skill_name (locally modified)"
+          fi
+        else
+          warn "  Skipped skill: $skill_name (no stored checksum)"
+        fi
+      fi
+    done
+  fi
+
+  # Update checksums + version
   compute_checksums "$TEMPLATE_DIR" "$CHECKSUMS_FILE"
+  save_template_version "$TEMPLATE_DIR"
 
   echo ""
   info "Update complete. $UPDATED file(s) updated."
