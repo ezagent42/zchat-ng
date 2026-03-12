@@ -88,7 +88,246 @@ Agent 状态：● running (绿) / ○ migrated (灰) / ○ offline (红) / ○ 
 
 ---
 
-## 5. 命令 → CLI 映射
+## 5. Widget 组件与状态管理
+
+### 5.1 架构概述
+
+Textual 采用 Elm 架构：事件 → 状态变更 → 自动重渲染。zchat-tui 的状态分为两层：
+
+- **reactive 属性**：定义在 Widget 上，变更时自动触发 `watch_*` 或 `recompose`
+- **CLI 回调**：ZChatCLI 的异步回调将外部事件（新消息、状态变化、bundle 到达）转化为 Widget 的 reactive 赋值
+
+```
+ZChatCLI callbacks ──→ App.on_* handlers ──→ widget.reactive = new_value
+                                                     │
+                                              watch_* / recompose
+                                                     │
+                                               自动重渲染
+```
+
+### 5.2 ZChatApp（app.py）
+
+主 App，唯一持有 `ZChatCLI` 实例的组件。
+
+```
+compose:
+  Header（Tab 栏 + Identity 显示）
+  Horizontal:
+    Sidebar (20%)
+    ContentSwitcher:    ← 按 active_tab 切换
+      DashboardTab
+      ChatTab
+      SessionTab
+  CommandBar
+```
+
+| reactive | 类型 | 触发 |
+|---|---|---|
+| `active_tab` | `str` | Tab 切换 → ContentSwitcher.current |
+| `identity` | `Identity \| None` | 引导流程完成 / CLI 连接成功 |
+| `connected` | `bool` | Zenoh 网络连接状态 |
+
+**职责**：
+- 注册全局 keybindings（Tab/Ctrl+Q/n/?）
+- 在 `on_mount` 中调用 `cli.start()` 并注册所有 CLI 回调
+- 充当 CLI 回调到 Widget 的中转：收到回调后 `post_message` 给目标 Widget
+- 管理 ModalScreen（对话框通过 `push_screen` 弹出）
+
+### 5.3 Sidebar（sidebar.py）
+
+左侧可折叠面板，展示网络中的三类实体。
+
+| reactive | 类型 | 数据来源 |
+|---|---|---|
+| `peers` | `list[Identity]` | `cli.on_presence_changed` |
+| `sessions` | `list[SessionInfo]` | `cli.on_session_changed` |
+| `rooms` | `list[RoomInfo]` | `cli.on_room_changed` |
+| `selected` | `str \| None` | 用户点击/键盘选中 |
+
+**SessionInfo** 包含：session_id, agent Identity, 状态（5 种）, owner, operator。
+
+**渲染逻辑**：
+- 三个 Collapsible 区域（Peers / Sessions / Rooms），各区域内用 ListItem
+- Session 列表每项：状态图标 + agent 名 + operator 名
+- Room 列表每项：房间名 + 成员数 + 未读计数
+- 选中 Session → 切换到 Dashboard Tab 并聚焦该 session
+- 选中 Room → 切换到 Chat Tab 并切换到该 room
+
+### 5.4 DashboardTab（dashboard.py）
+
+Session 管理视图。左右分栏，参考 Claude Squad 的 30/70 布局。
+
+```
+compose:
+  Horizontal:
+    SessionList (fr=3)    ← session 列表
+    SessionPreview (fr=7) ← 选中 session 的预览
+```
+
+| reactive | 类型 | 说明 |
+|---|---|---|
+| `selected_session` | `str \| None` | 当前选中的 session_id |
+| `preview_mode` | `str` | "output" / "config" / "log"（预览标签页） |
+
+**SessionList**（子 Widget）：
+
+| reactive | 类型 | 数据来源 |
+|---|---|---|
+| `sessions` | `list[SessionInfo]` | 从 Sidebar.sessions 同步 |
+
+每项渲染：`● ppt-maker (alice) [running]`。j/k 导航，Enter 聚焦到 Session Tab。
+
+**SessionPreview**（子 Widget）：
+
+| reactive | 类型 | 数据来源 |
+|---|---|---|
+| `output_lines` | `list[str]` | `cli.on_session_output`（Agent 流式输出） |
+| `config` | `SpawnConfig \| None` | 选中 session 的配置 |
+
+输出预览通过 `RichLog` Widget 追加渲染，避免全量重绘。
+
+### 5.5 ChatTab（chat.py）
+
+聊天视图。上下分区，上方 Timeline 可滚动，下方输入固定高度。
+
+```
+compose:
+  Vertical:
+    TimelineView (fr=1)   ← 消息列表，占满剩余空间
+    ChatInput (height=5)  ← 输入区域，固定 5 行
+```
+
+| reactive | 类型 | 说明 |
+|---|---|---|
+| `current_target` | `Target \| None` | 当前聊天目标（Room 或 DM） |
+| `timeline` | `Timeline` | 当前 scope 的 Timeline 数据 |
+
+**TimelineView**（子 Widget）：
+
+| reactive | 类型 | 数据来源 |
+|---|---|---|
+| `entries` | `list[Message]` | `cli.on_message` 追加新消息 |
+| `gaps` | `list[TimeGap]` | `cli.on_offline_sync` 填充 gap |
+
+渲染规则：
+- 人类消息：`[HH:MM] alice: 内容`
+- Agent 消息：`[HH:MM] 🤖 ppt-maker: 内容`（Agent 前缀图标）
+- SystemEvent：按级别着色（Info=Cyan, Warning=Yellow, Error=Red）
+- 离线 gap：`─── 离线期间 (14:30 - 16:45) ───` 分隔线
+- Annotation 高亮：CRITICAL 消息加粗，@mention 部分高亮
+
+使用 `RichLog` 追加渲染（on_message 回调时 `write` 新行），滚动到底部。
+
+**ChatInput**（子 Widget）：
+
+| reactive | 类型 | 说明 |
+|---|---|---|
+| `draft` | `str` | 当前输入内容 |
+
+Enter 发送 → `cli.send(target, content)`。支持 @mention 补全（Tab 触发，从 Sidebar.peers + sessions 中匹配）。以 `:` 开头时转交 CommandBar 处理。
+
+### 5.6 SessionTab（session_tab.py）
+
+Agent 交互视图。默认只读，Ctrl+E 进入交互模式（仅 Operator）。
+
+| reactive | 类型 | 说明 |
+|---|---|---|
+| `attached_session` | `str \| None` | 当前 attach 的 session_id |
+| `is_interactive` | `bool` | 是否处于交互模式 |
+| `interactive_timeout` | `float` | 交互模式剩余秒数（5 分钟递减） |
+| `output_lines` | `list[str]` | Agent 终端输出 |
+
+**交互模式状态机**：
+
+```
+只读 ──Ctrl+E──→ 交互（如果是 Operator）
+  ↑                    │
+  └──Escape / 超时 5min─┘
+```
+
+交互模式下键盘输入通过 `cli.session_send_keys(session_id, keys)` 发送到 tmux。
+只读模式下用 `RichLog` 渲染 Agent 输出流。
+
+### 5.7 CommandBar（command_bar.py）
+
+底部命令输入栏。
+
+| reactive | 类型 | 说明 |
+|---|---|---|
+| `command_text` | `str` | 当前命令文本 |
+| `suggestions` | `list[str]` | 自动补全候选 |
+| `is_active` | `bool` | 命令栏是否获得焦点 |
+
+**命令解析**：注册表模式。每个命令注册 name + parser + handler：
+
+```
+registry = {
+    "spawn":   (parse_spawn,   handle_spawn),
+    "room":    (parse_room,    handle_room),
+    "session": (parse_session, handle_session),
+    "afk":     (parse_noop,    handle_afk),
+    ...
+}
+```
+
+输入 `:` 时 CommandBar 获得焦点，Enter 执行，Escape 取消。部分命令（spawn/grant/reclaim/kill）执行前 `push_screen` 弹出确认对话框。
+
+### 5.8 对话框（dialogs.py）
+
+所有对话框继承 `ModalScreen[T]`，通过 `dismiss(result)` 返回用户选择。
+
+| 对话框 | ModalScreen 泛型 | dismiss 值 |
+|---|---|---|
+| SpawnConfirmDialog | `str \| None` | "confirm" / "edit" / None（取消） |
+| MigrateConfirmDialog | `bool` | True（确认）/ False（取消） |
+| CloseSafetyDialog | `bool` | True（强制关闭）/ False（取消） |
+| BundleReceiveDialog | `bool` | True（恢复）/ False（丢弃） |
+| ReclaimConfirmDialog | `bool` | True（确认）/ False（取消） |
+
+调用模式（在 App 或 CommandBar 中）：
+
+```python
+def handle_spawn(self, agent: str):
+    config = await cli.spawn(agent)  # 获取预览配置
+
+    def on_confirm(result: str | None):
+        if result == "confirm":
+            cli.spawn_confirm()
+        elif result == "edit":
+            # 打开 TOML 编辑
+            ...
+
+    self.app.push_screen(SpawnConfirmDialog(config), on_confirm)
+```
+
+### 5.9 CLI → Widget 数据流总览
+
+| CLI 回调 | 目标 Widget | 更新的 reactive |
+|---|---|---|
+| `on_message(msg)` | ChatTab.TimelineView | `entries` 追加 |
+| `on_session_changed(info)` | Sidebar, DashboardTab.SessionList | `sessions` |
+| `on_session_output(id, lines)` | DashboardTab.SessionPreview, SessionTab | `output_lines` |
+| `on_presence_changed(peers)` | Sidebar | `peers` |
+| `on_room_changed(rooms)` | Sidebar | `rooms` |
+| `on_bundle_received(bundle)` | App → push BundleReceiveDialog | — |
+| `on_offline_sync(msgs)` | ChatTab.TimelineView | `gaps` 填充 + `entries` 补充 |
+| `on_permission_request(req)` | App → push PermissionDialog（Operator 场景） | — |
+
+### 5.10 Phase 0 Mock 策略
+
+Phase 0 中所有 CLI 回调由 MockZChatCLI 驱动：
+
+- `on_message`：定时 1 秒后返回假回复
+- `on_session_changed`：spawn 后立即推送 running 状态
+- `on_presence_changed`：启动时推送 hardcoded peers
+- `on_room_changed`：启动时推送 hardcoded rooms
+- 其他回调：按需触发，返回合理假数据
+
+全部 Widget 的 reactive 属性、compose 结构、CLI 回调绑定在 Phase 0 就位。Phase 1 只替换 MockZChatCLI → 真实 ZChatCLI，Widget 层不变。
+
+---
+
+## 6. 命令 → CLI 映射（同 §5.7 命令注册表）
 
 | TUI 命令 | ZChatCLI 方法 |
 |---|---|
@@ -109,7 +348,7 @@ Agent 状态：● running (绿) / ○ migrated (灰) / ○ offline (红) / ○ 
 
 ---
 
-## 6. 对话框
+## 7. 对话框（同 §5.8 ModalScreen）
 
 **Spawn 确认**：配置摘要 → Y/n/e。
 **迁移确认**：列出 operator 变更。
@@ -119,7 +358,7 @@ Agent 状态：● running (绿) / ○ migrated (灰) / ○ offline (红) / ○ 
 
 ---
 
-## 7. Timeline 渲染
+## 8. Timeline 渲染（同 §5.5 TimelineView）
 
 离线标注：
 ```
@@ -132,7 +371,7 @@ Bundle 等待：`有 pending bundle，等待 peer 上线...`
 
 ---
 
-## 8. 与 zchat-cli 的交互
+## 9. 与 zchat-cli 的交互（同 §5.9 数据流）
 
 ```python
 from zchat_cli import ZChatCLI
@@ -145,7 +384,7 @@ cli.on_offline_sync(lambda msgs: tui.show_offline_messages(msgs))
 
 ---
 
-## 9. 边界
+## 10. 边界
 
 | 范围内 | 范围外 |
 |---|---|
