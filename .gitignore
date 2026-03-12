@@ -1,0 +1,8 @@
+# Skills CLI runtime (restored on session start)
+.agents/
+
+# User-local launcher overrides
+claude.local.sh
+
+# Template checksums (managed by update-from-template.sh)
+.claude/.template-checksums
