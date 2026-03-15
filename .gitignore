@@ -6,3 +6,14 @@ claude.local.sh
 
 # MCP server secrets (API keys, tokens)
 .mcp.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# uv
+.venv/
+uv.lock

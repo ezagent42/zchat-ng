@@ -1,0 +1,19 @@
+[project]
+name = "zchat-cli"
+version = "0.0.6.3"
+description = "ZChat core layer — operation semantics + Backend interfaces"
+requires-python = ">=3.12"
+dependencies = ["zchat-protocol", "typer>=0.15"]
+
+[project.scripts]
+zchat = "zchat_cli.__main__:main"
+
+[tool.uv.sources]
+zchat-protocol = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zchat_cli"]

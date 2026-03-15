@@ -1,0 +1,28 @@
+[project]
+name = "zchat-ng"
+version = "0.0.6.3"
+description = "ZChat-NG: next-generation LAN chat with AI agents"
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.uv.sources]
+zchat-protocol = { workspace = true }
+zchat-cli = { workspace = true }
+zchat-com = { workspace = true }
+zchat-acp = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "zchat-protocol",
+    "zchat-cli",
+    "zchat-com",
+    "zchat-acp",
+]
