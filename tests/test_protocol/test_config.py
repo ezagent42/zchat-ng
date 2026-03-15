@@ -234,6 +234,23 @@ def test_resolve_finds_project_via_filesystem(tmp_path, monkeypatch):
 # ── Frozen dataclass ──
 
 
+def test_rooms_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZCHAT_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ZCHAT_RUNTIME", str(tmp_path / "run"))
+    config = ZChatConfig.resolve()
+    assert config.rooms_file == config.home / "rooms.json"
+
+
+def test_handled_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZCHAT_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ZCHAT_RUNTIME", str(tmp_path / "run"))
+    config = ZChatConfig.resolve()
+    assert config.handled_file == config.store_dir / ".handled.json"
+
+
+# ── Frozen dataclass ──
+
+
 def test_config_is_frozen(tmp_path):
     """ZChatConfig is immutable."""
     cfg = ZChatConfig(home=tmp_path, project=None, runtime=tmp_path / "rt")

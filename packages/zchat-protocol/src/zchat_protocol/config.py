@@ -70,6 +70,16 @@ class ZChatConfig:
     def workspaces_dir(self) -> Path:
         return self.home / "workspaces"
 
+    @property
+    def rooms_file(self) -> Path:
+        """Room registry: $ZCHAT_HOME/rooms.json"""
+        return self.home / "rooms.json"
+
+    @property
+    def handled_file(self) -> Path:
+        """Event handled markers: $ZCHAT_HOME/store/.handled.json"""
+        return self.store_dir / ".handled.json"
+
     # ── Project paths ──
 
     @property
