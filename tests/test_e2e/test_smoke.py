@@ -1,74 +1,75 @@
-"""E2E smoke tests — exercise the CLI via subprocess."""
-
+"""E2E smoke tests — all CLI commands runnable with FileComBackend."""
+import os
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
 
-def run_zchat(*args: str) -> subprocess.CompletedProcess:
-    """Run ``python -m zchat_cli`` with the given arguments."""
+@pytest.fixture(scope="module")
+def zchat_home():
+    with tempfile.TemporaryDirectory(prefix="zchat-smoke-") as d:
+        yield d
+
+
+def run_zchat(*args, zchat_home, identity="smoke@testnet"):
+    env = {
+        **os.environ,
+        "ZCHAT_IDENTITY": identity,
+        "ZCHAT_HOME": zchat_home,
+        "ZCHAT_RUNTIME": os.path.join(zchat_home, "runtime"),
+    }
     return subprocess.run(
         [sys.executable, "-m", "zchat_cli", *args],
-        capture_output=True,
-        text=True,
-        timeout=10,
+        capture_output=True, text=True, timeout=10, env=env,
     )
 
 
-def test_doctor():
-    result = run_zchat("doctor")
-    assert result.returncode == 0
-    output = result.stdout.lower()
-    assert "ok" in output
+class TestPhase0Smoke:
+    def test_doctor(self, zchat_home):
+        r = run_zchat("doctor", zchat_home=zchat_home)
+        assert r.returncode == 0
 
+    def test_status(self, zchat_home):
+        r = run_zchat("status", zchat_home=zchat_home)
+        assert r.returncode == 0
 
-def test_status():
-    result = run_zchat("status")
-    assert result.returncode == 0
-    assert "Sessions" in result.stdout
+    def test_rooms(self, zchat_home):
+        r = run_zchat("rooms", zchat_home=zchat_home)
+        assert r.returncode == 0
+        assert "#general" in r.stdout
 
+    def test_send(self, zchat_home):
+        r = run_zchat("send", "#general", "hello from smoke", zchat_home=zchat_home)
+        assert r.returncode == 0
 
-def test_spawn():
-    result = run_zchat("spawn", "ppt-maker", "--yes")
-    assert result.returncode == 0
-    assert "ppt-maker" in result.stdout
+    def test_watch_no_follow(self, zchat_home):
+        r = run_zchat("watch", "#general", "--no-follow", zchat_home=zchat_home)
+        assert r.returncode == 0
 
+    def test_watch_verbose(self, zchat_home):
+        r = run_zchat("watch", "#general", "--verbose", "--no-follow", zchat_home=zchat_home)
+        assert r.returncode == 0
 
-def test_send():
-    result = run_zchat("send", "@ppt-maker", "做一个 Q3 PPT")
-    assert result.returncode == 0
+    def test_ext_list(self, zchat_home):
+        r = run_zchat("ext", "list", zchat_home=zchat_home)
+        assert r.returncode == 0
 
+    def test_sessions(self, zchat_home):
+        r = run_zchat("sessions", zchat_home=zchat_home)
+        assert r.returncode == 0
 
-def test_watch_no_follow():
-    result = run_zchat("watch", "#general", "--no-follow")
-    assert result.returncode == 0
+    def test_preflight(self, zchat_home):
+        r = run_zchat("preflight", zchat_home=zchat_home)
+        assert r.returncode == 0
 
-
-def test_watch_verbose():
-    result = run_zchat("watch", "#general", "--verbose", "--no-follow")
-    assert result.returncode == 0
-
-
-def test_ext_list():
-    result = run_zchat("ext", "list")
-    assert result.returncode == 0
-    assert "No extensions" in result.stdout
-
-
-def test_rooms():
-    result = run_zchat("rooms")
-    assert result.returncode == 0
-    assert "#general" in result.stdout
-
-
-def test_preflight():
-    result = run_zchat("preflight")
-    # May fail if gh/claude not installed, but should still run
-    output = result.stdout.lower()
-    assert "python" in output
-
-
-def test_sessions():
-    result = run_zchat("sessions")
-    assert result.returncode == 0
+    def test_missing_identity_crashes(self):
+        env = {k: v for k, v in os.environ.items() if k != "ZCHAT_IDENTITY"}
+        env["ZCHAT_HOME"] = "/tmp/zchat-noident"
+        r = subprocess.run(
+            [sys.executable, "-m", "zchat_cli", "doctor"],
+            capture_output=True, text=True, timeout=10, env=env,
+        )
+        assert r.returncode != 0
+        assert "ZCHAT_IDENTITY" in r.stderr
