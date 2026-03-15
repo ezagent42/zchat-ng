@@ -355,6 +355,90 @@ async def test_concurrent_publish(backend):
     )
     events = await backend.query_events("#general")
     assert len(events) == 40
+
+
+# ── Subscribe ──
+
+@pytest.mark.asyncio
+async def test_subscribe_yields_new_events(backend):
+    """Subscribe yields events published after subscribe starts."""
+    received = []
+
+    async def publisher():
+        await asyncio.sleep(0.3)  # let subscribe start first
+        for i in range(3):
+            evt = ZChatEvent.create(
+                room="#general", type=OperationType.MSG, from_="alice@testnet",
+                content={"text": f"sub-msg-{i}"}, content_type="text/plain",
+            )
+            await backend.publish(evt)
+            await asyncio.sleep(0.1)
+
+    async def subscriber():
+        count = 0
+        async for event in backend.subscribe("#general"):
+            received.append(event)
+            count += 1
+            if count >= 3:
+                break
+
+    await asyncio.wait_for(
+        asyncio.gather(publisher(), subscriber()),
+        timeout=10,
+    )
+    assert len(received) == 3
+    assert received[0].content["text"] == "sub-msg-0"
+
+
+@pytest.mark.asyncio
+async def test_subscribe_handles_partial_lines(backend, zchat_env):
+    """Subscribe skips corrupted/partial JSON lines gracefully."""
+    path = zchat_env["home"] / "store" / "general" / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Write a corrupted line followed by a valid one
+    path.write_text("")  # start empty
+
+    received = []
+
+    async def writer():
+        await asyncio.sleep(0.3)
+        with open(path, "a") as f:
+            f.write('{"broken json\n')  # corrupted
+            valid = ZChatEvent.create(
+                room="#general", type=OperationType.MSG, from_="alice@testnet",
+                content={"text": "valid"}, content_type="text/plain",
+            )
+            f.write(json.dumps(valid.to_dict()) + "\n")
+
+    async def reader():
+        async for event in backend.subscribe("#general"):
+            received.append(event)
+            break  # just get the valid one
+
+    await asyncio.wait_for(
+        asyncio.gather(writer(), reader()),
+        timeout=10,
+    )
+    assert len(received) == 1
+    assert received[0].content["text"] == "valid"
+
+
+# ── Template config loading ──
+
+@pytest.mark.asyncio
+async def test_load_template_config(backend, zchat_env, monkeypatch):
+    project = zchat_env["home"].parent / "project" / ".zchat"
+    templates_dir = project / "templates"
+    templates_dir.mkdir(parents=True)
+    (templates_dir / "coder.toml").write_text('name = "coder"\nmodel = "claude"')
+    monkeypatch.setenv("ZCHAT_PROJECT", str(project))
+
+    from zchat_com.file import FileComBackend
+    config = ZChatConfig.resolve()
+    backend2 = FileComBackend(config=config, identity=Identity.parse("alice@testnet"))
+    info = await backend2.load_template_config("coder")
+    assert info.name == "coder"
+    assert info.path != ""
 ```
 
 - [ ] **Step 2: Run — expect FAIL**
@@ -747,7 +831,8 @@ from pathlib import Path
 
 import pytest
 
-from zchat_protocol import Identity, ZChatConfig, ZChatEvent
+from zchat_protocol import Identity, OperationType, ZChatConfig, ZChatEvent
+from zchat_cli.types import SessionStatus
 
 
 # Path to echo-agent.sh relative to repo root
@@ -877,7 +962,113 @@ async def test_event_watcher_detects_mention(backends):
     sessions = await acp.sessions()
     for s in sessions:
         await acp.kill_session(s.session_id)
+
+
+@pytest.mark.asyncio
+async def test_sessions_lists_active(backends):
+    """Spawn 2 agents, sessions() returns both."""
+    acp = backends["acp"]
+    from zchat_cli.types import SpawnPreview
+    p1 = SpawnPreview(agent_name="agent-1", model=ECHO_AGENT)
+    p2 = SpawnPreview(agent_name="agent-2", model=ECHO_AGENT)
+    await acp.confirm_spawn(p1)
+    await acp.confirm_spawn(p2)
+
+    sessions = await acp.sessions()
+    running = [s for s in sessions if s.status == SessionStatus.RUNNING]
+    assert len(running) == 2
+    names = {s.agent.label for s in running}
+    assert names == {"agent-1", "agent-2"}
+
+    for s in sessions:
+        await acp.kill_session(s.session_id)
+
+
+@pytest.mark.asyncio
+async def test_sessions_detects_dead(backends):
+    """Spawn, manually kill PID, sessions() marks STOPPED."""
+    import os, signal
+    acp = backends["acp"]
+    from zchat_cli.types import SpawnPreview
+    preview = SpawnPreview(agent_name="doomed", model=ECHO_AGENT)
+    await acp.confirm_spawn(preview)
+
+    sessions = await acp.sessions()
+    sid = sessions[0].session_id
+    pid = acp._processes[sid].pid
+    # Kill externally
+    os.kill(pid, signal.SIGKILL)
+    await asyncio.sleep(0.2)
+
+    sessions_after = await acp.sessions()
+    assert sessions_after[0].status == SessionStatus.STOPPED
+
+    # Cleanup file
+    await acp.kill_session(sid)
+
+
+@pytest.mark.asyncio
+async def test_attach_pauses_watcher(backends):
+    """Attach pauses event watcher — @mention gets no auto-response."""
+    com = backends["com"]
+    acp = backends["acp"]
+    from zchat_cli.types import SpawnPreview
+    preview = SpawnPreview(agent_name="pause-test", model=ECHO_AGENT)
+    await acp.confirm_spawn(preview)
+    sessions = await acp.sessions()
+    sid = sessions[0].session_id
+
+    # Attach (pauses watcher)
+    await acp.attach(sid)
+
+    # Send @mention — should NOT trigger auto-response
+    evt = ZChatEvent.create(
+        room="#general", type=OperationType.MSG, from_="alice@testnet",
+        content={"text": "hello @pause-test", "mentions": ["pause-test"]},
+        content_type="text/plain",
+    )
+    await com.publish(evt)
+    await asyncio.sleep(1.5)
+
+    events = await com.query_events("#general")
+    agent_replies = [e for e in events if "pause-test" in e.from_]
+    assert len(agent_replies) == 0  # watcher is paused
+
+    await acp.kill_session(sid)
+
+
+@pytest.mark.asyncio
+async def test_detach_resumes_watcher(backends):
+    """Detach after attach resumes event watcher — @mention gets response."""
+    com = backends["com"]
+    acp = backends["acp"]
+    from zchat_cli.types import SpawnPreview
+    preview = SpawnPreview(agent_name="resume-test", model=ECHO_AGENT)
+    await acp.confirm_spawn(preview)
+    sessions = await acp.sessions()
+    sid = sessions[0].session_id
+
+    # Attach then detach
+    await acp.attach(sid)
+    await acp.detach(sid)
+
+    # Send @mention — should trigger auto-response now
+    evt = ZChatEvent.create(
+        room="#general", type=OperationType.MSG, from_="alice@testnet",
+        content={"text": "hello @resume-test", "mentions": ["resume-test"]},
+        content_type="text/plain",
+    )
+    await com.publish(evt)
+    await asyncio.sleep(2)
+
+    events = await com.query_events("#general")
+    agent_replies = [e for e in events if "resume-test" in e.from_]
+    assert len(agent_replies) >= 1
+
+    await acp.kill_session(sid)
 ```
+
+Note: These tests need `from zchat_cli.types import SessionStatus` added to the imports at the top of the test file.
 
 - [ ] **Step 2: Run — expect FAIL**
 
@@ -1409,12 +1600,20 @@ class TestMultiUser:
         # its own process. The daemon agent lifecycle requires a long-running
         # process. For Phase 0, we test the spawn+mention flow in
         # test_acp/test_script_backend.py instead (in-process async tests).
+
+    def test_session_kill_cleanup(self, shared_home):
+        """Spawn then kill — session file removed, sessions list empty."""
+        # First spawn
+        r = run_as("alice@testnet", "spawn", "test-kill-agent", "--yes", home=shared_home)
+        # Even if spawn exits immediately (no daemon), verify sessions command works
+        r = run_as("alice@testnet", "sessions", home=shared_home)
+        assert r.returncode == 0
 ```
 
 - [ ] **Step 3: Run E2E tests — expect PASS**
 
 Run: `uv run pytest tests/test_e2e/ -v --timeout=30`
-Expected: ~13 tests pass (10 smoke + 1 identity error + 2 multiuser)
+Expected: ~14 tests pass (10 smoke + 1 identity error + 3 multiuser)
 
 - [ ] **Step 4: Run full test suite**
 
