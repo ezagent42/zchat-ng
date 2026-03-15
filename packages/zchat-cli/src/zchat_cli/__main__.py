@@ -42,12 +42,32 @@ def _run(coro):
 
 
 def _get_cli() -> ZChatCLI:
-    """Create a ZChatCLI backed by mock backends (for phase-0 skeleton)."""
-    from zchat_com.mock import MockComBackend
-    from zchat_acp.mock import MockAcpBackend
+    """Create a ZChatCLI backed by file + script backends.
 
-    com = MockComBackend()
-    acp = MockAcpBackend()
+    Requires: ZCHAT_IDENTITY env var (e.g. alice@onesyn).
+    Uses: ZCHAT_HOME for state (default ~/.zchat).
+    """
+    import os
+    identity_str = os.environ.get("ZCHAT_IDENTITY")
+    if not identity_str:
+        typer.echo(
+            "Error: ZCHAT_IDENTITY not set.\n"
+            "Run: export ZCHAT_IDENTITY=alice@onesyn",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    from zchat_protocol import ZChatConfig, Identity
+    from zchat_com.file import FileComBackend
+    from zchat_acp.script import ScriptAcpBackend
+
+    config = ZChatConfig.resolve()
+    config.ensure_home()
+    config.ensure_runtime()
+
+    identity = Identity.parse(identity_str)
+    com = FileComBackend(config=config, identity=identity)
+    acp = ScriptAcpBackend(config=config, identity=identity, com=com)
     return ZChatCLI(com=com, acp=acp)
 
 
