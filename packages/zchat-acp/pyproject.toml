@@ -3,10 +3,11 @@ name = "zchat-acp"
 version = "0.0.6.3"
 description = "ZChat Agent Communication Protocol layer"
 requires-python = ">=3.12"
-dependencies = ["zchat-protocol"]
+dependencies = ["zchat-protocol", "zchat-cli"]
 
 [tool.uv.sources]
 zchat-protocol = { workspace = true }
+zchat-cli = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
