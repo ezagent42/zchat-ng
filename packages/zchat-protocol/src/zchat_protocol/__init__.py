@@ -13,6 +13,7 @@ from zchat_protocol.extension_manifest import ExtensionManifest
 from zchat_protocol.content_types.acp import AcpPayload
 from zchat_protocol.content_types.text import TextContent
 from zchat_protocol.content_types.system_event import SystemEvent
+from zchat_protocol.config import ZChatConfig
 from zchat_protocol.content_types.spawn_config import SpawnConfig
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "TextContent",
     "SystemEvent",
     "SpawnConfig",
+    "ZChatConfig",
 ]
