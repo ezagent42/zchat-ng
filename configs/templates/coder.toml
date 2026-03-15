@@ -1,0 +1,8 @@
+[meta]
+program = "claude"
+
+[skills]
+enabled = ["superpowers"]
+
+[mcp_servers]
+extra = []
